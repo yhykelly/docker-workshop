@@ -24,3 +24,79 @@ After all, the dependency between different system packages or libraries inside 
 
 ### What is Volume?
 A Docker volume is simply a place to store data that lives outside a container, so the data doesn’t disappear when the container stops or is deleted. Inside Docker, there is actually a folder on the host machine that Docker manages and mounts into the container when the container is run.
+
+Docker has two ways to bind the data storage into the container:
+
+|   | Named volume  |  bind mount |
+|---|---|---|
+|What is it | A docker-managed storage| real folder in your host machine|
+|Where is it | also somewhere in the host machine, but is managed by Docker | the actual path you declare, managed by yourself|
+|Advantage | Docker manages and protects data from being accidentally removed| user has more control; the path is easily shared among coworkers|
+| Disadvantage| cannot inspect the data casually; the name volume is local to the host machine, more difficult to be shared; disk usage is opaque|deleting files inside the container deletes them on your host too|
+
+```{bash}
+# named volume
+# Survives container deletion
+-v ny_taxi_postgres_data:/var/lib/postgresql
+
+# bind mount
+# location relative to where you run the Docker
+-v ./pgdata:/var/lib/postgresql
+```
+
+### Useful commands
+1. check Docker version
+```{bash}
+docker --version
+```
+
+2. run a docker container, without having to interact with the terminal, e.g.
+
+```{bash}
+docker run hello-world
+
+# running background jobs
+docker run -d postgres:18
+
+# running batch jobs
+docker run --rm my_ingest_job
+```
+
+3. run a docker container, having to interact with the terminal (thats why "-it"), e.g.
+```{bash}
+docker run -it ubuntu bash
+
+# running psql
+docker run -it postgres psql -U root
+
+# run Python REPL
+docker run -it --rm python:3.9.16 python
+
+# run a shell inside the image
+docker run -it --rm python:3.9.16 bash
+
+# override entrypoint (the way the course taught to start python)
+docker run -it --rm --entrypoint=bash python:3.9.16
+```
+`--entrypoint` controls WHAT process starts
+
+4. See what image I have on the machine
+```{bash}
+docker image ls
+```
+
+5. Remove image I have on the machine
+```{bash}
+docker image rm <IMAGE_ID>
+```
+
+6. See stopped containers:
+```{bash}
+docker ps -a
+```
+7. Delete all stopped containers:
+```{bash}
+docker rm $(docker ps -aq)
+```
+8. `--rm`: indicate cleans up the container after it exits
+9. `-d` indicate detached (runs in background)
