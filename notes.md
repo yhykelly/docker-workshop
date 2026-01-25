@@ -100,3 +100,197 @@ docker rm $(docker ps -aq)
 ```
 8. `--rm`: indicate cleans up the container after it exits
 9. `-d` indicate detached (runs in background)
+
+### Dockerising something - what do we need(#some-markdown-heading)
+1. we write in a .Dockerfile
+```{Dockerfile}
+# base Docker image that we will build on
+FROM python:3.13.11-slim
+
+# set up our image by installing prerequisites; pandas in this case
+RUN pip install pandas pyarrow
+
+# set up the working directory inside the container
+WORKDIR /app
+# copy the script to the container. 1st name is source file, 2nd is destination
+COPY pipeline.py pipeline.py
+
+# define what to do first when the container runs
+# in this example, we will just run the script
+ENTRYPOINT ["python", "pipeline.py"]
+```
+
+Explanation:
+
+`FROM`: Base image (Python 3.13)
+`RUN`: Execute commands during build
+`WORKDIR`: Set working directory
+`COPY`: Copy files into the image
+`ENTRYPOINT`: Default command to run
+
+2. We build up the docker file. Here the image name will be `test`, with a custom "tag" `pandas`. (If the tag isn't specified it will default to `latest`.)
+
+```
+docker build -t test:pandas .
+```
+
+3. Run the image
+
+```
+docker run -it test:pandas <command_line_argument_as_needed>
+```
+
+### Example: Running PostgreSQL with Docker
+We need:  
+1. A running postgres in the background
+```
+docker run -it --rm \
+  -e POSTGRES_USER="root" \
+  -e POSTGRES_PASSWORD="root" \
+  -e POSTGRES_DB="ny_taxi" \
+  -v ny_taxi_postgres_data:/var/lib/postgresql \
+  -p 5432:5432 \
+  postgres:18
+```
+
+Now, if we want to ingest the data inside this table in this databse running in the container:
+```
+uv run python ingest_data.py \
+  --pg-user=root \
+  --pg-pass=root \
+  --pg-host=localhost \
+  --pg-port=5432 \
+  --pg-db=ny_taxi \
+  --target-table=yellow_taxi_trips
+```
+
+2. **Alternative 1** Use `pgcli`
+We use tools as interface connected to the postgres. Here we use `uv run pgcli` (not dockerised here). The port is therefore mapped to the port number at host machine first. The mapped port will be mapped back inside the running container.
+```
+uv add --dev pgcli
+uv run pgcli -h localhost -p 5432 -u root -d ny_taxi
+```
+
+**Alternative 2** Use `pgAdmin`. `pgAdmin` can be run in container. Therefore, when we run two containers, we make sure the two containers find each other.
+First we creata a Dcoker network
+```
+docker network create pg-network
+```
+Then we rerun the postgres in one terminal --
+```
+# Run PostgreSQL on the network
+docker run -it \
+  -e POSTGRES_USER="root" \
+  -e POSTGRES_PASSWORD="root" \
+  -e POSTGRES_DB="ny_taxi" \
+  -v ny_taxi_postgres_data:/var/lib/postgresql \
+  -p 5432:5432 \
+  --network=pg-network \
+  --name pgdatabase \
+  postgres:18
+```
+
+and run pgAdmin in another
+```
+# In another terminal, run pgAdmin on the same network
+docker run -it \
+  -e PGADMIN_DEFAULT_EMAIL="admin@admin.com" \
+  -e PGADMIN_DEFAULT_PASSWORD="root" \
+  -v pgadmin_data:/var/lib/pgadmin \
+  -p 8085:80 \
+  --network=pg-network \
+  --name pgadmin \
+  dpage/pgadmin4
+```
+The container names (`pgdatabase` and `pgadmin`) allow the containers to find each other within the network.
+With this network setup, **remember!!** the host is not localhost anymore (we do not connect from host machine now). Host should pgdatabase (the container name)
+
+3. Dockerising the ingestion pipeline as well
+Above we learned to run the ingestion from local using uv and map from localhost 5432 to the container port 5432. We can also dockerise the ingestion pipeline and run it as a container. What we have to do is update the Dockerfile. (same logic as [Dockerising something - what do we need](#dockerising-something---what-do-we-needsome-markdown-heading))
+
+```
+FROM python:3.13.11-slim
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/
+
+WORKDIR /code
+ENV PATH="/code/.venv/bin:$PATH"
+
+COPY pyproject.toml .python-version uv.lock ./
+RUN uv sync --locked
+
+COPY ingest_data.py .
+
+ENTRYPOINT ["uv", "run", "python", "ingest_data.py"]
+```
+
+Run this in a new terminal, with the other services also running in other terminals. Remember to specify `--network=pg-network` so that it recognise the ingestion share the same network
+```
+docker run -it \
+  --network=pg-network \
+  taxi_ingest:v001 \
+    --user=root \
+    --password=root \
+    --host=pgdatabase \
+    --port=5432 \
+    --db=ny_taxi \
+    --table=yellow_taxi_trips
+```
+
+### Docker Compose
+Docker Compose is used when multiple services need to run together and we **don't want to run the containers separately in many terminals**. We put all containers and write in a `docker-compose.yaml`, and creates a shared network (e.g. pipeline_default) so services can communicate by name. and we don't need to run everything separately anymore.
+
+```{yaml}
+services:
+  pgdatabase:
+    image: postgres:18
+    environment:
+      POSTGRES_USER: "root"
+      POSTGRES_PASSWORD: "root"
+      POSTGRES_DB: "ny_taxi"
+    volumes:
+      - "ny_taxi_postgres_data:/var/lib/postgresql"
+    ports:
+      - "5432:5432"
+
+  pgadmin:
+    image: dpage/pgadmin4
+    environment:
+      PGADMIN_DEFAULT_EMAIL: "admin@admin.com"
+      PGADMIN_DEFAULT_PASSWORD: "root"
+    volumes:
+      - "pgadmin_data:/var/lib/pgadmin"
+    ports:
+      - "8085:80"
+
+
+
+volumes:
+  ny_taxi_postgres_data:
+  pgadmin_data:
+```
+We can now run Docker compose by running the following command from the same directory where docker-compose.yaml is found. Make sure that all previous containers aren't running anymore:
+
+```
+docker-compose up
+```
+
+After `docker compose up`, we can run the ingestion container taxi_ingest:v001 separately and attach it to the same network (pipeline_default). By using --host=pgdatabase, the ingestion container connects to the Postgres service and writes data into the same persistent database volume.
+
+```
+If you want to re-run the dockerized ingest script when you run Postgres and pgAdmin with docker compose, you will have to find the name of the virtual network that Docker compose created for the containers.
+
+# check the network link:
+docker network ls
+
+# it's pipeline_default (or similar based on directory name)
+# now run the script:
+docker run -it --rm\
+  --network=pipeline_default \
+  taxi_ingest:v001 \
+    --pg-user=root \
+    --pg-pass=root \
+    --pg-host=pgdatabase \
+    --pg-port=5432 \
+    --pg-db=ny_taxi \
+    --target-table=yellow_taxi_trips
+```
